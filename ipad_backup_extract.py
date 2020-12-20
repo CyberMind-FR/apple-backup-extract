@@ -12,6 +12,7 @@ import biplist # sudo apt install python3-biplist
 import pprint
 import stat
 import shutil
+import datetime
 
 def main():
     parser = argparse.ArgumentParser()
@@ -23,6 +24,9 @@ def main():
                         help='Extract (copy) files to DEST')
     parser.add_argument('-s', '--size-check', action='store_true',
                         help='check the size of file in db vs on disk and warn if mismatch')
+
+    parser.add_argument('-c', '--camera', action='store_true',
+                        help='Limit extract/list to camera images and videos only')
     args = parser.parse_args()
 
     norm_input = os.path.realpath(args.input_dir)
@@ -44,11 +48,23 @@ def main():
     for row in db.cursor().execute('SELECT fileID, domain, relativePath, flags, file FROM Files'):
         fileID, domain, relativePath, flags, filePlist = row
         assert '/' not in domain, repr(row)
-        dom_path = os.path.join(domain, relativePath)
-        
-        if args.list:
-            print(fileID, dom_path, end='')
-        
+
+        if args.camera:
+            if domain != 'CameraRollDomain':
+                continue
+            if relativePath.startswith('Media/'):
+                # Strip "/Media" prefix
+                dom_path = relativePath.split('/', 1)[1]
+            else:
+                # Something else, include to prevent data loss
+                dom_path = '__Other__/' + relativePath
+                
+            if '/PhotoData/' in dom_path or '/MediaAnalysis/' in dom_path:
+                # Skip thumbnails or analytics
+                continue
+        else:
+            dom_path = os.path.join(domain, relativePath)
+                
         rowinfo = dict(fileId=fileID, domain=domain, relativePath=relativePath, flags=flags)
         
         # parse plist for things like attributes. Hardcode the only known format, so we know if
@@ -97,10 +113,30 @@ def main():
         assert not common_missing, 'common keys missing\n' + pprint.pformat(
             dict(row=rowinfo, pl_attrib=pl_attrib, common_missing=common_missing, uncommon_keys=uncommon_keys))
         
+
+        # Decode extended attributes
+        if 'ExtendedAttributes' in pl_attrib:
+            exattr = pl_attrib['ExtendedAttributes']
+            assert (sorted(exattr.keys()) == ['$class', 'NS.data'] and
+                    exattr['$class'] == {
+                        '$classname': 'NSMutableData',
+                        '$classes': ['NSMutableData', 'NSData', 'NSObject']}), \
+                        'extattr meta malformed\n' + pprint.pformat(
+                            dict(row=rowinfo, pl_attrib=pl_attrib))
+            exattr = biplist.readPlistFromString(exattr['NS.data'])
+            for k, v in exattr.items():
+                if k in ['com.apple.assetsd.addedDate', 'com.apple.assetsd.customCreationDate']:
+                    v = biplist.readPlistFromString(v)
+                    if isinstance(v, datetime.datetime):
+                        v = v.isoformat()
+                    exattr[k] = v
+                elif isinstance(v, bytes) and len(v) == 2:
+                    exattr[k] = v[0] + v[1] * 256
+            pl_attrib['ExtendedAttributes'] = exattr                                    
         
         mode = pl_attrib['Mode']
             
-        # must be regular file then
+        # must be regular file or symlink
         assert (flags in [1, 2] and uncommon_keys.issubset({'ExtendedAttributes', 'Digest'})) or (
             flags == 4 and uncommon_keys == {'Target'} and stat.S_ISLNK(mode)), \
                 'Unexpected object type\n' + pprint.pformat(
@@ -117,7 +153,8 @@ def main():
             if other['ProtectionClass'] == 0:
                 del other['ProtectionClass']
             mode = other.pop('Mode')
-            print(' %s mode=%5o own=%d:%d size=%d mtime=%d ctime=%d btime=%d ino=0x%X' % (
+            print('%s %s %s mode=%5o own=%d:%d size=%d mtime=%d ctime=%d btime=%d ino=0x%X' % (
+                fileID, dom_path,
                 ('REG' if stat.S_ISREG(mode) else 'DIR' if stat.S_ISDIR(mode) else 'OTHER'),
                 mode, other.pop('UserID'), other.pop('GroupID'), other.pop('Size'),
                 other.pop('LastModified'), other.pop('LastStatusChange'), other.pop('Birth'),
