@@ -14,6 +14,8 @@ import stat
 import shutil
 import datetime
 
+NO_EMPTY_DIRS = True   # TODO: make this into command-line option
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('input_dir',
@@ -175,7 +177,9 @@ def main():
         if args.extract:
             dest = os.path.join(args.extract, dom_path)
             mtime = pl_attrib['LastModified']
-            if stat.S_ISDIR(mode):
+            if stat.S_ISDIR(mode) and NO_EMPTY_DIRS:
+                pass  # Skip directory entries, create them on demand
+            elif stat.S_ISDIR(mode):
                 try:
                     existing = os.stat(dest)
                 except FileNotFoundError:
@@ -212,7 +216,7 @@ def main():
             else:
                 print('* skipping unknown obj %r (%o)' % (dest, mode), file=sys.stderr)
 
-            if (count % 5000) == 0:
+            if (count % 1000) == 0:
                 print('* %d files extracted so far' % count, file=sys.stderr, flush=True)
                 
         count += 1
